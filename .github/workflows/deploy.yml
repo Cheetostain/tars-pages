@@ -1,0 +1,57 @@
+# Decrypts bundle.enc with the PAGES_BUNDLE_KEY secret and deploys it to GitHub Pages.
+# The repository only ever holds the encrypted bundle, so page addresses can't be listed from it.
+# Nothing here prints file names: the Pages archive is built quietly (upload-pages-artifact runs tar -v,
+# which would list every page in this public log), and the artifact is deleted once the deploy is done.
+name: deploy
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+  actions: write
+concurrency:
+  group: pages
+  cancel-in-progress: true
+jobs:
+  deploy:
+    # Only bundle commits (and manual runs) deploy; the commit that adds this file has no bundle yet.
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.event.head_commit.message, 'bundle ')
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Decrypt and pack the site
+        env:
+          PAGES_BUNDLE_KEY: ${{ secrets.PAGES_BUNDLE_KEY }}
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir _site
+          printf '%s' "$PAGES_BUNDLE_KEY" > "$RUNNER_TEMP/k"
+          openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -md sha256 -in bundle.enc -pass "file:$RUNNER_TEMP/k" | tar -xzf - -C _site
+          rm -f "$RUNNER_TEMP/k"
+          chmod -R a+rX _site
+          tar --dereference --hard-dereference -C _site -cf "$RUNNER_TEMP/artifact.tar" .
+          rm -rf _site
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: github-pages
+          path: ${{ runner.temp }}/artifact.tar
+          retention-days: 1
+          if-no-files-found: error
+      - id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
+      - name: Delete the artifact
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for id in $(gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts" --jq '.artifacts[].id'); do
+            gh api -X DELETE "repos/${{ github.repository }}/actions/artifacts/$id" > /dev/null
+          done
